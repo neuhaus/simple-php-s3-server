@@ -1,6 +1,13 @@
 <?php
 
-/** Backend-neutral maintenance entry point; schedule from cron as before. */
+/**
+ * Multipart upload 残留清理脚本
+ *
+ * 清理超过 MULTIPART_UPLOAD_TTL（默认 86400 秒 = 1 天）未完成的分片上传。
+ * 建议通过 crontab 每日执行：
+ *   0 3 * * * /usr/bin/php /path/to/simple-php-s3-server/cleanup_multipart.php
+ */
+
 require_once __DIR__ . '/vendor/autoload.php';
 
 date_default_timezone_set('UTC');
