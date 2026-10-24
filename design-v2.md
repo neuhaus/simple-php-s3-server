@@ -7,7 +7,7 @@
 ## 2. 设计原则
 
 - **最小化**：明确排除 ACL、Versioning、Object Lock、Lifecycle、Server-Side Encryption、跨区域复制等非核心能力。
-- **存储与元数据归后端所有**：控制器通过存储接口获取 size / mtime / mime / etag 与 bucket 时间戳。默认文件系统后端从文件系统读取元数据；仅内容 ETag 保存在小型旁路（sidecar）文件中。
+- **存储与元数据归后端所有**：控制器通过存储接口获取 size / mtime / mime / etag 与 bucket 时间戳。默认文件系统后端从文件系统读取元数据；内容 ETag 与客户端提供的元数据保存在小型旁路（sidecar）文件中。
 - **错误边界收敛**：对外响应固定 S3 错误码与简短消息，内部细节仅写入日志。
 - **保持兼容**：不破坏现有数据目录结构与配置文件格式。
 - **现代 PHP**：使用 PHP 8.1+、类型化属性与显式的存储接口。
@@ -73,9 +73,9 @@ HTTP 请求
 | 操作 | 方法 | 路径 | 说明 |
 | --- | --- | --- | --- |
 | PutObject | PUT | `/{bucket}/{key}` | 控制器向后端传递流；请求 body 在流式读取时以有界内存暂存，`MAX_UPLOAD_SIZE` 按解码后的字节计算 |
-| CopyObject | PUT | `/{bucket}/{key}` | 通过 `X-Amz-Copy-Source` 头触发，服务端复制 |
+| CopyObject | PUT | `/{bucket}/{key}` | 通过 `X-Amz-Copy-Source` 头触发，服务端复制；`x-amz-metadata-directive` 为 `COPY`（默认）或 `REPLACE` |
 | GetObject | GET | `/{bucket}/{key}` | 支持 `Range: bytes=` 单段范围请求（206） |
-| HeadObject | HEAD | `/{bucket}/{key}` | 返回 size/content-type/etag/last-modified/accept-ranges |
+| HeadObject | HEAD | `/{bucket}/{key}` | 返回 size/content-type/etag/last-modified/accept-ranges 及 `x-amz-meta-*` 用户元数据 |
 | DeleteObject | DELETE | `/{bucket}/{key}` | 删除由后端执行；FileStorage 同时清理空目录 |
 | DeleteObjects | POST | `/{bucket}?delete` | 批量删除，单次上限 1000 key，XML 请求/响应 |
 
@@ -150,10 +150,13 @@ HTTP 请求
 | --- | --- |
 | size | 读取文件大小 |
 | mtime | 读取文件修改时间（UTC 输出） |
-| mime | 通过 MIME 检测推断，失败回退 `application/octet-stream` |
+| mime | 上传时给定的 `Content-Type`；否则通过 MIME 检测推断，失败回退 `application/octet-stream` |
+| metadata | 上传时（PutObject、CreateMultipartUpload）或 CopyObject 使用 `REPLACE` 时给定的 `x-amz-meta-*` 用户元数据 |
 | etag | 内容 MD5（与 S3 一致）；多段上传对象使用 S3 的复合格式 `md5(各 part 二进制 MD5 拼接)-{part 数}` |
 
-> MD5 在写入上传内容时同步计算，无需额外读盘，并保存在旁路文件中：对象为 `{DATA_DIR}/.meta/{bucket}/{key}.json`，part 为上传目录内的 `{n}.meta.json`。旁路文件记录对应文件的 inode、大小与 mtime；若缺失或过期（写入与记录之间崩溃、直接在磁盘上修改、旧版本数据），则对文件计算一次哈希进行修复。rclone 等客户端会依据 ETag 校验上传结果。
+> MD5 在写入上传内容时同步计算，无需额外读盘，并保存在旁路文件中：对象为 `{DATA_DIR}/.meta/{bucket}/{key}.json`，part 为上传目录内的 `{n}.meta.json`。旁路文件记录对应文件的 inode、大小与 mtime；若缺失或过期（写入与记录之间崩溃、直接在磁盘上修改、旧版本数据），则对文件计算一次哈希进行修复；其客户端元数据无法恢复，予以丢弃。rclone 等客户端会依据 ETag 校验上传结果。
+
+> 用户元数据遵循 S3：名称以小写存储，值保持不变，名称与值的总大小上限为 2 KB（`MetadataTooLarge`）。GET 与 HEAD 以 `x-amz-meta-*` 头返回。CopyObject 复制源对象的 Content-Type 与元数据，或在 `x-amz-metadata-directive: REPLACE` 时取自请求。将对象复制到自身需要 `REPLACE`，且只修改元数据；rclone 以此保存修改时间。PHP 通过 CGI 变量提供请求头，因此元数据名称中的 `-` 与 `_` 无法区分，名称统一以 `-` 表示。
 
 ### 8.1 流的所有权
 
@@ -189,6 +192,8 @@ Apache 2.4 的 HTTP 头过滤器会在 HEAD 请求中删除字面值 `Content-Le
 | EntityTooLarge | 400 | 超出 `file_max_size` |
 | ExpiredToken | 400 | 时间偏移过大或 presigned URL 过期 |
 | MethodNotAllowed | 405 | 不支持的 HTTP 方法 |
+| MetadataTooLarge | 400 | 用户元数据超过 2 KB |
+| InvalidArgument | 400 | 未知的 `x-amz-metadata-directive` |
 | InternalError | 500 | 未预期异常 |
 | NotImplemented | 501 | 后端未实现 `MultipartStorage` 时的多段上传请求 |
 

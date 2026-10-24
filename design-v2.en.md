@@ -7,7 +7,7 @@ Implement a lightweight, S3-compatible API gateway (PHP 8.1+) with a replaceable
 ## 2. Design Principles
 
 - **Minimalism**: Explicitly excludes ACL, Versioning, Object Lock, Lifecycle, Server-Side Encryption, cross-region replication, and other non-core capabilities.
-- **Backend-owned storage and metadata**: Controllers obtain size / mtime / mime / etag and bucket timestamps through storage interfaces. The default filesystem backend reads metadata from the filesystem; only content ETags are kept in small sidecar files.
+- **Backend-owned storage and metadata**: Controllers obtain size / mtime / mime / etag and bucket timestamps through storage interfaces. The default filesystem backend reads metadata from the filesystem; content ETags and client-supplied metadata are kept in small sidecar files.
 - **Error boundary convergence**: External responses return fixed S3 error codes and short messages; internal details are written only to logs.
 - **Backward compatibility**: Does not break the existing data directory structure or configuration file format.
 - **Modern PHP**: Uses PHP 8.1+, typed properties, and explicit storage interfaces.
@@ -73,9 +73,9 @@ For subdirectory deployments, bucket/key routing omits the front controller's `S
 | Operation | Method | Path | Description |
 | --- | --- | --- | --- |
 | PutObject | PUT | `/{bucket}/{key}` | Controller passes a stream to the backend; the request body is spooled with bounded memory while streaming, and `MAX_UPLOAD_SIZE` applies to decoded bytes |
-| CopyObject | PUT | `/{bucket}/{key}` | Triggered via `X-Amz-Copy-Source` header, server-side copy |
+| CopyObject | PUT | `/{bucket}/{key}` | Triggered via `X-Amz-Copy-Source` header, server-side copy; `x-amz-metadata-directive` `COPY` (default) or `REPLACE` |
 | GetObject | GET | `/{bucket}/{key}` | Supports `Range: bytes=` single-range requests (206) |
-| HeadObject | HEAD | `/{bucket}/{key}` | Returns size/content-type/etag/last-modified/accept-ranges |
+| HeadObject | HEAD | `/{bucket}/{key}` | Returns size/content-type/etag/last-modified/accept-ranges and `x-amz-meta-*` user metadata |
 | DeleteObject | DELETE | `/{bucket}/{key}` | Delegates removal to the backend; FileStorage also cleans up empty directories |
 | DeleteObjects | POST | `/{bucket}?delete` | Batch delete, up to 1000 keys per request, XML request/response |
 
@@ -150,10 +150,13 @@ The storage backend returns object metadata (`size`, `mtime`, `mime`, unquoted `
 | --- | --- |
 | size | file size |
 | mtime | file modification time (UTC output) |
-| mime | inferred via MIME detection, falls back to `application/octet-stream` on failure |
+| mime | `Content-Type` given at upload; otherwise inferred via MIME detection, falling back to `application/octet-stream` |
+| metadata | `x-amz-meta-*` user metadata given at upload (PutObject, CreateMultipartUpload) or by CopyObject with `REPLACE` |
 | etag | content MD5, as in S3; multipart objects use S3's composite form `md5(concatenated binary part MD5s)-{part count}` |
 
-> The MD5 is computed while the upload is written, so no extra disk read is needed, and stored in a sidecar file: `{DATA_DIR}/.meta/{bucket}/{key}.json` for objects, `{n}.meta.json` inside the upload directory for parts. Each sidecar records the inode, size and mtime of its file; a missing or stale sidecar (crash between write and record, files changed directly on disk, data from older versions) is repaired by hashing the file once. Clients such as rclone verify uploads against the ETag.
+> The MD5 is computed while the upload is written, so no extra disk read is needed, and stored in a sidecar file: `{DATA_DIR}/.meta/{bucket}/{key}.json` for objects, `{n}.meta.json` inside the upload directory for parts. Each sidecar records the inode, size and mtime of its file; a missing or stale sidecar (crash between write and record, files changed directly on disk, data from older versions) is repaired by hashing the file once; its client metadata cannot be recovered and is dropped. Clients such as rclone verify uploads against the ETag.
+
+> User metadata follows S3: names are stored in lowercase, values unchanged, and their total size (names plus values) is limited to 2 KB (`MetadataTooLarge`). GET and HEAD return them as `x-amz-meta-*` headers. CopyObject copies the source's Content-Type and metadata, or takes them from the request with `x-amz-metadata-directive: REPLACE`. Copying an object onto itself requires `REPLACE` and changes only the metadata; rclone uses this to store modification times. PHP exposes request headers through CGI variables, so `-` and `_` in metadata names cannot be told apart; names arrive with `-`.
 
 ### 8.1 Stream ownership
 
@@ -189,6 +192,8 @@ Apache 2.4's HTTP header filter removes a literal `Content-Length: 0` on HEAD. T
 | EntityTooLarge | 400 | Exceeds `file_max_size` |
 | ExpiredToken | 400 | Timestamp skew too large or presigned URL expired |
 | MethodNotAllowed | 405 | Unsupported HTTP method |
+| MetadataTooLarge | 400 | User metadata exceeds 2 KB |
+| InvalidArgument | 400 | Unknown `x-amz-metadata-directive` |
 | InternalError | 500 | Unexpected exception |
 | NotImplemented | 501 | Multipart request against a backend without `MultipartStorage` |
 

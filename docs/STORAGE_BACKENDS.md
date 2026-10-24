@@ -21,6 +21,11 @@ accept no required arguments. Applications can also inject a backend into
 - The `etag` is the hex MD5 of the object's content, or S3's multipart form
   `md5(concatenated binary part MD5s)-{part count}`; part ETags are the parts' MD5s.
   Clients such as rclone verify uploads against it.
+- `putObjectFromStream`, `copyObject` and `createMultipartUpload` accept optional
+  `ObjectMetadata` (the upload's Content-Type and `x-amz-meta-*` user metadata).
+  Store it with the object and return it through `getObjectMeta`: the Content-Type as
+  `mime`, user metadata as `metadata`. `copyObject` without replacement metadata copies
+  the source's; a copy onto itself with replacement metadata changes only the metadata.
 - Filesystem writes use a temporary sibling file and rename it into place after
   copying the input successfully.
 

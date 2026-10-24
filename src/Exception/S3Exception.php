@@ -74,6 +74,16 @@ class S3Exception extends \Exception
         return new self('InvalidRequest', $message, 400);
     }
 
+    public static function invalidArgument(string $message): self
+    {
+        return new self('InvalidArgument', $message, 400);
+    }
+
+    public static function metadataTooLarge(): self
+    {
+        return new self('MetadataTooLarge', 'Your metadata headers exceed the maximum allowed metadata size.', 400);
+    }
+
     public static function invalidXML(string $resource = ''): self
     {
         return new self('MalformedXML', 'The XML you provided was not well-formed.', 400, $resource);

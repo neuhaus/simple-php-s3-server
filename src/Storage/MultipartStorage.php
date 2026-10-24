@@ -5,7 +5,8 @@ namespace S3Gateway\Storage;
 /** Optional capability; backends without it return S3 NotImplemented. */
 interface MultipartStorage extends Storage
 {
-    public function createMultipartUpload(string $bucket, string $uploadId): bool;
+    /** $metadata is applied to the object when the upload completes. */
+    public function createMultipartUpload(string $bucket, string $uploadId, ?ObjectMetadata $metadata = null): bool;
     public function multipartUploadExists(string $bucket, string $uploadId): bool;
     public function getPartMeta(string $bucket, string $uploadId, int $partNumber): ?array;
     public function listParts(string $bucket, string $uploadId): array;

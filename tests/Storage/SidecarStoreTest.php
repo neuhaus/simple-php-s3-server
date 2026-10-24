@@ -3,12 +3,12 @@
 namespace S3Gateway\Tests\Storage;
 
 use PHPUnit\Framework\TestCase;
-use S3Gateway\Storage\EtagStore;
+use S3Gateway\Storage\SidecarStore;
 use S3Gateway\Storage\FileStorage;
 use S3Gateway\Tests\ResetsConfig;
 
 /** Content ETags (MD5) as S3 clients such as rclone verify them. */
-class EtagStoreTest extends TestCase
+class SidecarStoreTest extends TestCase
 {
     use ResetsConfig;
 
@@ -140,8 +140,23 @@ class EtagStoreTest extends TestCase
         $this->assertFileExists($sidecar);
     }
 
+    public function testStaleSidecarDropsMetadata(): void
+    {
+        $this->storage->putObjectFromStream('bucket', 'a.txt', self::streamOf('first'), new \S3Gateway\Storage\ObjectMetadata('text/x-first', ['mtime' => '1']));
+
+        // Content replaced on disk: the recorded metadata no longer applies.
+        $path = $this->testDir . '/bucket/a.txt';
+        file_put_contents($path . '.new', 'second');
+        rename($path . '.new', $path);
+
+        $meta = $this->storage->getObjectMeta('bucket', 'a.txt');
+        $this->assertSame(md5('second'), $meta['etag']);
+        $this->assertSame([], $meta['metadata']);
+        $this->assertNotSame('text/x-first', $meta['mime']);
+    }
+
     public function testMultipartEtagFormat(): void
     {
-        $this->assertSame(md5(md5('a', true)) . '-1', EtagStore::multipartEtag([md5('a')]));
+        $this->assertSame(md5(md5('a', true)) . '-1', SidecarStore::multipartEtag([md5('a')]));
     }
 }

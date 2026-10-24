@@ -38,7 +38,7 @@ class MultipartController
 
         $uploadId = bin2hex(random_bytes(16));
 
-        if (!$multipart->createMultipartUpload($bucket, $uploadId)) {
+        if (!$multipart->createMultipartUpload($bucket, $uploadId, MetadataHeaders::fromRequest($request))) {
             throw S3Exception::internalError('Failed to create multipart upload', "/{$bucket}/{$key}");
         }
 

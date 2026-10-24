@@ -13,13 +13,13 @@ class FileStorage implements MultipartStorage
 
     private PathResolver $pathResolver;
     private MetaReader $metaReader;
-    private EtagStore $etagStore;
+    private SidecarStore $sidecars;
 
     public function __construct()
     {
         $this->pathResolver = new PathResolver();
-        $this->etagStore = new EtagStore($this->pathResolver);
-        $this->metaReader = new MetaReader($this->pathResolver, $this->etagStore);
+        $this->sidecars = new SidecarStore($this->pathResolver);
+        $this->metaReader = new MetaReader($this->pathResolver, $this->sidecars);
     }
 
     public function getPathResolver(): PathResolver
@@ -56,17 +56,17 @@ class FileStorage implements MultipartStorage
         return $stream;
     }
 
-    public function putObjectFromStream(string $bucket, string $key, $input): ?array
+    public function putObjectFromStream(string $bucket, string $key, $input, ?ObjectMetadata $metadata = null): ?array
     {
         $path = $this->pathResolver->objectPath($bucket, $key);
-        if (!$this->writeStreamAtomically($path, $input)) {
+        if (!$this->writeStreamAtomically($path, $input, $metadata)) {
             return null;
         }
         return $this->getObjectMeta($bucket, $key);
     }
 
-    /** Write $input to $path via a sibling temp file and record its content MD5. */
-    private function writeStreamAtomically(string $path, $input): bool
+    /** Write $input to $path via a sibling temp file and record its content MD5 and metadata. */
+    private function writeStreamAtomically(string $path, $input, ?ObjectMetadata $metadata = null): bool
     {
         if (!is_resource($input) || !$this->pathResolver->ensureParentDir($path)) {
             return false;
@@ -77,7 +77,7 @@ class FileStorage implements MultipartStorage
             return false;
         }
         try {
-            $md5 = EtagStore::copyWithMd5($input, $output);
+            $md5 = SidecarStore::copyWithMd5($input, $output);
             if ($md5 === null || !fflush($output)) {
                 return false;
             }
@@ -86,7 +86,7 @@ class FileStorage implements MultipartStorage
             if (!@rename($temporary, $path)) {
                 return false;
             }
-            $this->etagStore->record($path, $md5);
+            $this->sidecars->record($path, $md5, $metadata);
             return true;
         } finally {
             if (is_resource($output)) {
@@ -302,7 +302,7 @@ class FileStorage implements MultipartStorage
                     'key' => $s3Key,
                     'size' => $size,
                     'timestamp' => $fileInfo->getMTime(),
-                    'etag' => $this->etagStore->get($path) ?? ''
+                    'etag' => $this->sidecars->get($path) ?? ''
                 ];
             }
         }
@@ -421,7 +421,7 @@ class FileStorage implements MultipartStorage
         if (count($items) !== 0 || !@rmdir($bucketPath)) {
             return false;
         }
-        $this->etagStore->forgetBucket($bucket);
+        $this->sidecars->forgetBucket($bucket);
         return true;
     }
 
@@ -485,11 +485,11 @@ class FileStorage implements MultipartStorage
             return false;
         }
 
-        $this->etagStore->record($filePath, md5($content));
+        $this->sidecars->record($filePath, md5($content));
         return true;
     }
 
-    public function copyObject(string $sourceBucket, string $sourceKey, string $destBucket, string $destKey): bool
+    public function copyObject(string $sourceBucket, string $sourceKey, string $destBucket, string $destKey, ?ObjectMetadata $replaceMetadata = null): bool
     {
         $sourcePath = $this->pathResolver->objectPath($sourceBucket, $sourceKey);
         $destPath = $this->pathResolver->objectPath($destBucket, $destKey);
@@ -502,13 +502,26 @@ class FileStorage implements MultipartStorage
             return false;
         }
 
-        $etag = $this->etagStore->get($sourcePath);
+        $etag = $this->sidecars->get($sourcePath);
+        if ($etag === null) {
+            return false;
+        }
+        $metadata = $replaceMetadata ?? $this->sidecars->metadata($sourcePath);
+
+        // A copy onto itself changes only the metadata; copy() would fail on
+        // identical paths, and the content stays as it is.
+        if (realpath($sourcePath) === realpath($destPath)) {
+            if ($replaceMetadata === null) {
+                return false;
+            }
+            $this->sidecars->record($destPath, $etag, $metadata);
+            return true;
+        }
+
         if (!@copy($sourcePath, $destPath)) {
             return false;
         }
-        if ($etag !== null) {
-            $this->etagStore->record($destPath, $etag);
-        }
+        $this->sidecars->record($destPath, $etag, $metadata);
         return true;
     }
 
@@ -523,7 +536,7 @@ class FileStorage implements MultipartStorage
         $result = @unlink($filePath);
 
         if ($result) {
-            $this->etagStore->forget($bucket, $filePath);
+            $this->sidecars->forget($bucket, $filePath);
             $this->cleanupEmptyDirectories($bucket, dirname($filePath));
         }
 
@@ -604,7 +617,7 @@ class FileStorage implements MultipartStorage
         if (@file_put_contents($partPath, $content) === false) {
             return false;
         }
-        $this->etagStore->record($partPath, md5($content));
+        $this->sidecars->record($partPath, md5($content));
         return true;
     }
 
@@ -637,7 +650,7 @@ class FileStorage implements MultipartStorage
 
             foreach (array_keys($parts) as $partNumber) {
                 $partPath = $this->pathResolver->partPath($bucket, $uploadId, $partNumber);
-                $partMd5 = $this->etagStore->get($partPath);
+                $partMd5 = $this->sidecars->get($partPath);
                 if ($partMd5 === null) {
                     fclose($fp);
                     @unlink($tempPath);
@@ -689,8 +702,8 @@ class FileStorage implements MultipartStorage
                 return null;
             }
 
-            $etag = EtagStore::multipartEtag($partMd5s);
-            $this->etagStore->record($filePath, $etag);
+            $etag = SidecarStore::multipartEtag($partMd5s);
+            $this->sidecars->record($filePath, $etag, $this->readUploadMetadata($uploadDir));
             $this->safeDeleteDirectory($uploadDir);
 
             \S3Gateway\Logger::info("Multipart upload completed: bucket={$bucket}, key={$key}, uploadId={$uploadId}, size={$finalSize}, etag={$etag}");
@@ -731,10 +744,21 @@ class FileStorage implements MultipartStorage
         $this->safeDeleteDirectory($multipartBaseDir);
     }
 
-    public function createMultipartUpload(string $bucket, string $uploadId): bool
+    public function createMultipartUpload(string $bucket, string $uploadId, ?ObjectMetadata $metadata = null): bool
     {
         $uploadDir = $this->pathResolver->multipartPath($bucket, $uploadId);
-        return $this->pathResolver->ensureDir($uploadDir);
+        if (!$this->pathResolver->ensureDir($uploadDir)) {
+            return false;
+        }
+        // Part files have numeric names, so this file is never taken for a part.
+        return $metadata === null
+            || @file_put_contents(Path::join($uploadDir, 'upload.json'), json_encode($metadata->toArray())) !== false;
+    }
+
+    private function readUploadMetadata(string $uploadDir): ?ObjectMetadata
+    {
+        $data = json_decode((string)@file_get_contents(Path::join($uploadDir, 'upload.json')), true);
+        return is_array($data) ? ObjectMetadata::fromArray($data) : null;
     }
 
     private function safeDeleteDirectory(string $dir): bool

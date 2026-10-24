@@ -5,7 +5,8 @@ namespace S3Gateway\Storage;
 use Symfony\Component\Filesystem\Path;
 
 /**
- * Content ETags of stored files, kept in small JSON sidecar files.
+ * Content ETags and client metadata of stored files, kept in small JSON
+ * sidecar files.
  *
  * Objects map to DATA_DIR/.meta/{bucket}/{path}.json (bucket names cannot
  * start with a dot, so this tree never collides with a bucket). Multipart
@@ -14,9 +15,10 @@ use Symfony\Component\Filesystem\Path;
  *
  * Each sidecar records the inode, size and mtime of the file it describes.
  * A missing or stale sidecar (crash between write and record, files changed
- * on disk, data written by older versions) is repaired by hashing the file.
+ * on disk, data written by older versions) is repaired by hashing the file;
+ * its metadata cannot be recovered and is dropped.
  */
-class EtagStore
+class SidecarStore
 {
     private const BUFFER_SIZE = 65536;
 
@@ -40,27 +42,17 @@ class EtagStore
     /** ETag of $path, or null if it is not a file. */
     public function get(string $path): ?string
     {
-        $stat = $this->stat($path);
-        if ($stat === null) {
-            return null;
-        }
-        $data = json_decode((string)@file_get_contents($this->sidecarPath($path)), true);
-        if (is_array($data) && is_string($data['etag'] ?? null)
-            && ($data['ino'] ?? null) === $stat['ino']
-            && ($data['size'] ?? null) === $stat['size']
-            && ($data['mtime'] ?? null) === $stat['mtime']) {
-            return $data['etag'];
-        }
-        $md5 = @md5_file($path);
-        if ($md5 === false) {
-            return null;
-        }
-        $this->record($path, $md5);
-        return $md5;
+        return $this->read($path)['etag'] ?? null;
     }
 
-    /** Record the ETag of a file that was just written. */
-    public function record(string $path, string $etag): void
+    /** Client metadata of $path; empty when none was recorded. */
+    public function metadata(string $path): ObjectMetadata
+    {
+        return ObjectMetadata::fromArray($this->read($path)['metadata'] ?? []);
+    }
+
+    /** Record the ETag and metadata of a file that was just written. */
+    public function record(string $path, string $etag, ?ObjectMetadata $metadata = null): void
     {
         $stat = $this->stat($path);
         if ($stat === null) {
@@ -70,11 +62,40 @@ class EtagStore
         if (!$this->pathResolver->ensureParentDir($sidecar)) {
             return;
         }
+        $data = ['etag' => $etag] + $stat;
+        if ($metadata !== null) {
+            $data['metadata'] = $metadata->toArray();
+        }
         $tmp = $sidecar . '.' . bin2hex(random_bytes(4)) . '.tmp';
-        $json = json_encode(['etag' => $etag] + $stat);
-        if (@file_put_contents($tmp, $json) === false || !@rename($tmp, $sidecar)) {
+        if (@file_put_contents($tmp, json_encode($data)) === false || !@rename($tmp, $sidecar)) {
             @unlink($tmp);
         }
+    }
+
+    /**
+     * Valid sidecar data of $path, repairing a missing or stale sidecar.
+     *
+     * @return array{etag:string,metadata?:array}|null null if $path is not a file
+     */
+    private function read(string $path): ?array
+    {
+        $stat = $this->stat($path);
+        if ($stat === null) {
+            return null;
+        }
+        $data = json_decode((string)@file_get_contents($this->sidecarPath($path)), true);
+        if (is_array($data) && is_string($data['etag'] ?? null)
+            && ($data['ino'] ?? null) === $stat['ino']
+            && ($data['size'] ?? null) === $stat['size']
+            && ($data['mtime'] ?? null) === $stat['mtime']) {
+            return $data;
+        }
+        $md5 = @md5_file($path);
+        if ($md5 === false) {
+            return null;
+        }
+        $this->record($path, $md5);
+        return ['etag' => $md5];
     }
 
     /** Remove the sidecar of a deleted object and its now-empty directories. */

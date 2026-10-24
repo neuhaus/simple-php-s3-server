@@ -36,12 +36,13 @@ class ObjectController
         $copySource = $request->getHeader('X-Amz-Copy-Source');
 
         if ($copySource) {
-            $this->handleCopyObject($copySource, $bucket, $key, $response);
+            $this->handleCopyObject($request, $copySource, $bucket, $key, $response);
             return;
         }
 
+        $metadata = MetadataHeaders::fromRequest($request);
         $input = $request->getBodyStream();
-        $meta = $this->storage->putObjectFromStream($bucket, $key, $input);
+        $meta = $this->storage->putObjectFromStream($bucket, $key, $input, $metadata);
         if ($meta === null) {
             throw S3Exception::internalError('Failed to store object', "/{$bucket}/{$key}");
         }
@@ -53,7 +54,7 @@ class ObjectController
             ->sendEmpty(200);
     }
 
-    private function handleCopyObject(string $copySource, string $destBucket, string $destKey, Response $response): void
+    private function handleCopyObject(Request $request, string $copySource, string $destBucket, string $destKey, Response $response): void
     {
         $copySource = rawurldecode($copySource);
         $copySource = ltrim($copySource, '/');
@@ -80,7 +81,20 @@ class ObjectController
             throw S3Exception::noSuchKey($copySource);
         }
 
-        if (!$this->storage->copyObject($sourceBucket, $sourceKey, $destBucket, $destKey)) {
+        $directive = strtoupper($request->getHeader('X-Amz-Metadata-Directive') ?? 'COPY');
+        if ($directive !== 'COPY' && $directive !== 'REPLACE') {
+            throw S3Exception::invalidArgument('Unknown metadata directive.');
+        }
+        $replaceMetadata = $directive === 'REPLACE' ? MetadataHeaders::fromRequest($request) : null;
+
+        // As in S3, copying an object onto itself must change its metadata.
+        if ($replaceMetadata === null && $sourceBucket === $destBucket && $sourceKey === rawurldecode($destKey)) {
+            throw S3Exception::invalidRequest(
+                'This copy request is illegal because it is trying to copy an object to itself without changing the object\'s metadata.'
+            );
+        }
+
+        if (!$this->storage->copyObject($sourceBucket, $sourceKey, $destBucket, $destKey, $replaceMetadata)) {
             throw S3Exception::internalError('Failed to copy object', "/{$destBucket}/{$destKey}");
         }
 
@@ -138,6 +152,8 @@ class ObjectController
             $options['end'] = $rangeInfo['end'];
             $options['partial'] = true;
         }
+
+        MetadataHeaders::apply($response, $meta['metadata'] ?? []);
 
         $start = $options['start'] ?? 0;
         $length = isset($options['end']) ? $options['end'] - $start + 1 : $fileSize;
@@ -233,6 +249,7 @@ class ObjectController
         // but survives that filter so S3 clients can download empty objects.
         $contentLength = $meta['size'] === 0 ? '00' : (string)$meta['size'];
 
+        MetadataHeaders::apply($response, $meta['metadata'] ?? []);
         $response
             ->setHeader('Content-Length', $contentLength)
             ->setHeader('Content-Type', $meta['mime'])
