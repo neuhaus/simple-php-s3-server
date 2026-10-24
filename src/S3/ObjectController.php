@@ -41,11 +41,7 @@ class ObjectController
         }
 
         $input = $request->getBodyStream();
-        try {
-            $meta = $this->storage->putObjectFromStream($bucket, $key, $input);
-        } finally {
-            fclose($input);
-        }
+        $meta = $this->storage->putObjectFromStream($bucket, $key, $input);
         if ($meta === null) {
             throw S3Exception::internalError('Failed to store object', "/{$bucket}/{$key}");
         }

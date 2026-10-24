@@ -75,11 +75,7 @@ class MultipartController
         }
 
         $input = $request->getBodyStream();
-        try {
-            $partMeta = $multipart->savePartFromStream($bucket, $uploadId, $partNumber, $input);
-        } finally {
-            fclose($input);
-        }
+        $partMeta = $multipart->savePartFromStream($bucket, $uploadId, $partNumber, $input);
         if ($partMeta === null) {
             throw S3Exception::internalError('Failed to store upload part', "/{$bucket}/{$key}");
         }

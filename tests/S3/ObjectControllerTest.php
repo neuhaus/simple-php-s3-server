@@ -31,12 +31,18 @@ class ObjectControllerTest extends TestCase
         $this->cleanupDir($this->testDir);
     }
 
-    private function createRequest(string $method, string $uri, string $queryString = ''): Request
+    private function createRequest(string $method, string $uri, string $queryString = '', string $body = ''): Request
     {
         $_SERVER['REQUEST_METHOD'] = $method;
         $_SERVER['REQUEST_URI'] = $uri;
         $_SERVER['QUERY_STRING'] = $queryString;
-        return new Request();
+        if ($body === '') {
+            return new Request();
+        }
+        $input = fopen('php://temp/maxmemory:2097152', 'w+b');
+        fwrite($input, $body);
+        rewind($input);
+        return new Request($input);
     }
 
     public function testGetObjectReturnsContentAndMetadataHeaders(): void
@@ -192,9 +198,7 @@ class ObjectControllerTest extends TestCase
         }
         $xml .= '</Delete>';
 
-        $request = $this->createRequest('POST', '/del-bucket', 'delete');
-        $bodyRef = new \ReflectionProperty(Request::class, 'body');
-        $bodyRef->setValue($request, $xml);
+        $request = $this->createRequest('POST', '/del-bucket', 'delete', $xml);
 
         $response = new Response();
 
@@ -209,9 +213,7 @@ class ObjectControllerTest extends TestCase
     public function testDeleteObjectsOnMissingBucketThrowsNoSuchBucket(): void
     {
         $xml = '<Delete><Object><Key>file.txt</Key></Object></Delete>';
-        $request = $this->createRequest('POST', '/missing-bucket', 'delete');
-        $bodyRef = new \ReflectionProperty(Request::class, 'body');
-        $bodyRef->setValue($request, $xml);
+        $request = $this->createRequest('POST', '/missing-bucket', 'delete', $xml);
 
         try {
             $this->controller->deleteObjects($request, new Response());

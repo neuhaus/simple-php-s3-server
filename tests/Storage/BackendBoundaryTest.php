@@ -30,9 +30,10 @@ class BackendBoundaryTest extends TestCase
         if ($range !== '') {
             $_SERVER['HTTP_RANGE'] = $range;
         }
-        $request = new Request();
-        (new \ReflectionProperty(Request::class, 'body'))->setValue($request, $body);
-        return $request;
+        $input = fopen('php://temp/maxmemory:2097152', 'w+b');
+        fwrite($input, $body);
+        rewind($input);
+        return new Request($input);
     }
 
     private function response(): Response

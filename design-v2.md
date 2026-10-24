@@ -72,7 +72,7 @@ HTTP 请求
 
 | 操作 | 方法 | 路径 | 说明 |
 | --- | --- | --- | --- |
-| PutObject | PUT | `/{bucket}/{key}` | 控制器向后端传递流；HTTP 与认证层仍缓冲 body，受 `MAX_UPLOAD_SIZE` 限制 |
+| PutObject | PUT | `/{bucket}/{key}` | 控制器向后端传递流；请求 body 在流式读取时以有界内存暂存，`MAX_UPLOAD_SIZE` 按解码后的字节计算 |
 | CopyObject | PUT | `/{bucket}/{key}` | 通过 `X-Amz-Copy-Source` 头触发，服务端复制 |
 | GetObject | GET | `/{bucket}/{key}` | 支持 `Range: bytes=` 单段范围请求（206） |
 | HeadObject | HEAD | `/{bucket}/{key}` | 返回 size/content-type/etag/last-modified/accept-ranges |
@@ -114,13 +114,13 @@ HTTP 请求
 
 采用全局上限与按键配额双层检查：
 
-1. **早期检查**（认证前）：基于 `Content-Length` 头与全局上限比较，拒绝超大请求，避免读 body。
-2. **Per-key 检查**（认证后）：取 `Content-Length` 头与 body 实际长度的较大值，防止 `Content-Length: 0` 伪造；命中则返回 `EntityTooLarge` (400)。
+1. **早期检查**（认证前）：基于 `Content-Length` 头与全局上限比较，拒绝超大请求，避免读 body。对于 `aws-chunked` 上传，传输长度包含分帧与校验和开销，因此仅在存在 `X-Amz-Decoded-Content-Length` 时以其为准；否则交由暂存阶段判断。
+2. **Per-key 检查**（认证后）：先以较低成本拒绝声明大小超过该 key 上限的请求，再在 body 暂存过程中权威地应用上限：流式读取时统计解码后的字节数，一旦超限立即中止读取。伪造的 `Content-Length` 无法隐藏超大的 body；分帧开销不计入对象上限。超限返回 `EntityTooLarge` (400)。
 3. **Multipart 组装检查**：多段上传组装时在落盘前校验最终文件大小。
 
 全局上限由 `MAX_UPLOAD_SIZE` 配置（默认 8192 KiB / 8 MiB），约束请求与分片大小。FileStorage 同样对合并后的多段对象应用该上限，因此多段上传无法绕过最终对象限制。按键配额 `file_max_size` 进一步约束请求 body（单位整数 KiB）。
 
-控制器与后端之间的接口使用流，但 `Request::getBodyStream()` 目前只是封装已缓冲的 `getBody()` 结果。认证与大小校验仍会把完整请求 body 载入内存，本次重构不提供内存受限的 HTTP 上传。AWS chunked 的校验和分帧也可能导致请求超出大小检查，即使解码后的对象并未超限。
+请求 body 经由 `Http\BodySpool` 处理：数据以至多 64 KiB 的块从 `php://input` 写入可溢出到磁盘的临时流（`php://temp`，超过 2 MiB 写入磁盘），完整 body 从不成为 PHP 字符串。同一遍处理中计算 payload 的 SHA-256、解码 `aws-chunked` 分帧（由 `Content-Encoding: aws-chunked` 或任意 `STREAMING-*` 形式的 `x-amz-content-sha256` 触发），并执行大小限制。HTTP `Transfer-Encoding: chunked` 不做解码：SAPI 交给 PHP 的 body 已去除分块。签名匹配后由 Authenticator 启用校验：声明的 64 位十六进制 `x-amz-content-sha256` 与暂存的字节比对（不一致返回 `XAmzContentSHA256Mismatch`）；`STREAMING-AWS4-HMAC-SHA256-PAYLOAD` 及 `-TRAILER` 上传在读取时校验逐块签名链（以及 `x-amz-trailer-signature`）（失败返回 `SignatureDoesNotMatch`）；`x-amz-checksum-*` trailer（CRC32、CRC32C、SHA1、SHA256；CRC64NVME 不支持，予以忽略）按解码后的 payload 校验，`x-amz-trailer` 中声明的 trailer 必须出现；`UNSIGNED-PAYLOAD` / `STREAMING-UNSIGNED-PAYLOAD-TRAILER` 仅解码分帧，与 S3 语义一致。其他流式模式（ECDSA）予以拒绝。未发送 `x-amz-content-sha256` 时，签名计算在所声明 key 的上限下暂存 body。认证本身从不读取 body。`Request::getBodyStream()` 将暂存并解码后的流交给控制器；该流由 Request 持有并负责关闭。在 64 MiB 内存上限下，256 MiB 上传的 PHP 内存峰值实测约 6 MiB。
 
 ## 7. 存储布局
 
@@ -251,6 +251,5 @@ php vendor/bin/phpunit
 - 对象内容级 ETag（与 AWS 标准不同的已知取舍）
 - 虚拟主机风格寻址（host-style bucket），仅支持 path-style
 - SigV2 与 Bearer Token 认证（已弃用）
-- 端到端内存受限的 HTTP 上传流式处理
 
 当前 CORS 配置允许跨域请求，但未通过 `Access-Control-Expose-Headers` 向浏览器 JavaScript 暴露 ETag。跨域的多段上传客户端需要该头的暴露才能获取各 part 的 ETag。

@@ -72,7 +72,7 @@ For subdirectory deployments, bucket/key routing omits the front controller's `S
 
 | Operation | Method | Path | Description |
 | --- | --- | --- | --- |
-| PutObject | PUT | `/{bucket}/{key}` | Controller passes a stream to the backend; HTTP/authentication still buffer the body, and `MAX_UPLOAD_SIZE` applies |
+| PutObject | PUT | `/{bucket}/{key}` | Controller passes a stream to the backend; the request body is spooled with bounded memory while streaming, and `MAX_UPLOAD_SIZE` applies to decoded bytes |
 | CopyObject | PUT | `/{bucket}/{key}` | Triggered via `X-Amz-Copy-Source` header, server-side copy |
 | GetObject | GET | `/{bucket}/{key}` | Supports `Range: bytes=` single-range requests (206) |
 | HeadObject | HEAD | `/{bucket}/{key}` | Returns size/content-type/etag/last-modified/accept-ranges |
@@ -114,13 +114,13 @@ General constraints:
 
 Uses a dual-layer check of global upper bound and per-key quota:
 
-1. **Early check** (pre-auth): Compares the `Content-Length` header against the global upper bound, rejecting oversized requests before reading the body.
-2. **Per-key check** (post-auth): Takes the larger of the `Content-Length` header and the actual body length, preventing `Content-Length: 0` forgery; returns `EntityTooLarge` (400) on violation.
+1. **Early check** (pre-auth): Compares the `Content-Length` header against the global upper bound, rejecting oversized requests before reading the body. For `aws-chunked` uploads the wire length includes framing/checksum overhead, so only `X-Amz-Decoded-Content-Length` counts when present; otherwise the decision defers to the spool.
+2. **Per-key check** (post-auth): Cheaply rejects declared sizes above the key's limit, then applies the limit authoritatively inside the body spool: decoded bytes are counted while streaming and the read aborts as soon as the limit is exceeded. A forged `Content-Length` cannot hide an oversized body; framing overhead never counts against the object limit. Violations return `EntityTooLarge` (400).
 3. **Multipart assembly check**: Validates the final file size before persisting during multipart assembly.
 
 The global upper bound is controlled by `MAX_UPLOAD_SIZE` (default 8192 KiB / 8 MiB), constraining requests and parts. FileStorage also applies this limit to the completed multipart object; multipart uploads therefore do not bypass the configured final-object limit. The per-key `file_max_size` further constrains request bodies (unit: integer KiB).
 
-The controller-to-backend interface uses streams, but `Request::getBodyStream()` currently adapts the existing buffered `getBody()` result. Authentication and size validation still load the full request body into memory. This refactor does not provide bounded-memory HTTP uploads. AWS chunked checksum framing can also cause a request to exceed the size check even when the decoded object fits the limit.
+Request bodies flow through `Http\BodySpool`: bytes move from `php://input` in blocks of at most 64 KiB into a disk-spilling temp stream (`php://temp`, past 2 MiB on disk), so the full body never becomes a PHP string. The same pass computes the payload SHA-256, decodes `aws-chunked` framing (selected by `Content-Encoding: aws-chunked` or any `STREAMING-*` `x-amz-content-sha256`), and enforces the size limit. HTTP `Transfer-Encoding: chunked` is not decoded: the SAPI hands PHP an already de-chunked body. Verification is armed by the Authenticator after the signature matched: a declared 64-hex `x-amz-content-sha256` is compared against the spooled bytes (`XAmzContentSHA256Mismatch` on mismatch); `STREAMING-AWS4-HMAC-SHA256-PAYLOAD` and `-TRAILER` uploads have their per-chunk signature chain (plus `x-amz-trailer-signature`) verified while reading (`SignatureDoesNotMatch`); `x-amz-checksum-*` trailers (CRC32, CRC32C, SHA1, SHA256; CRC64NVME is not supported and ignored) are validated against the decoded payload, and trailers announced in `x-amz-trailer` must be present; `UNSIGNED-PAYLOAD`/`STREAMING-UNSIGNED-PAYLOAD-TRAILER` decode framing only, matching S3 semantics. Other streaming modes (ECDSA) are rejected. When no `x-amz-content-sha256` is sent, the signature calculation spools the body under the claimed key's limit. Authentication itself never reads the body. `Request::getBodyStream()` hands the spooled, decoded stream to controllers; the Request owns and closes it. Peak PHP memory for a 256 MiB upload measures ~6 MiB under a 64 MiB limit.
 
 ## 7. Storage Layout
 
@@ -251,6 +251,5 @@ See [Storage backends](docs/STORAGE_BACKENDS.md) for implementation contracts.
 - Content-level ETag (known trade-off differing from AWS standard)
 - Virtual host-style addressing (host-style bucket); only path-style is supported
 - SigV2 and Bearer Token authentication (deprecated)
-- End-to-end bounded-memory HTTP upload streaming
 
 The current CORS configuration permits cross-origin requests but does not expose ETag to browser JavaScript through `Access-Control-Expose-Headers`. Cross-origin multipart clients need that header exposure before they can collect part ETags.
