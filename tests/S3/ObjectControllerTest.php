@@ -136,11 +136,7 @@ class ObjectControllerTest extends TestCase
         $this->storage->createBucket('etag-bucket');
         $this->storage->putObjectFromString('etag-bucket', 'my%20file.txt', 'test data');
 
-        // ETag as calculated by putObject's controller logic (canonicalizeKey)
-        $expectedEtag = $this->storage->getMetaReader()->calculateEtag(
-            $this->storage->getPathResolver()->canonicalizeKey('my%20file.txt'),
-            strlen('test data')
-        );
+        $expectedEtag = md5('test data');
 
         // ETag as returned by LIST (from disk, decoded key)
         $result = $this->storage->listObjects('etag-bucket');
@@ -154,11 +150,8 @@ class ObjectControllerTest extends TestCase
         $this->storage->putObjectFromString('copy-bucket', 'source.txt', 'data');
         $this->storage->copyObject('copy-bucket', 'source.txt', 'copy-bucket', 'dest%20file.txt');
 
-        // ETag as calculated by handleCopyObject's controller logic (canonicalizeKey)
-        $expectedEtag = $this->storage->getMetaReader()->calculateEtag(
-            $this->storage->getPathResolver()->canonicalizeKey('dest%20file.txt'),
-            4 // strlen('data')
-        );
+        // The copy carries the source's content ETag.
+        $expectedEtag = md5('data');
 
         // ETag as returned by LIST (from disk, decoded key)
         $result = $this->storage->listObjects('copy-bucket');

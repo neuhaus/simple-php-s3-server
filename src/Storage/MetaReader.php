@@ -5,10 +5,12 @@ namespace S3Gateway\Storage;
 class MetaReader
 {
     private PathResolver $pathResolver;
+    private EtagStore $etagStore;
 
-    public function __construct(PathResolver $pathResolver)
+    public function __construct(PathResolver $pathResolver, ?EtagStore $etagStore = null)
     {
         $this->pathResolver = $pathResolver;
+        $this->etagStore = $etagStore ?? new EtagStore($pathResolver);
     }
 
     public function getObjectMeta(string $bucket, string $key): ?array
@@ -33,7 +35,10 @@ class MetaReader
         }
 
         $mime = $this->detectMimeType($filePath);
-        $etag = $this->calculateEtag($this->pathResolver->canonicalizeKey($key), $size);
+        $etag = $this->etagStore->get($filePath);
+        if ($etag === null) {
+            return null;
+        }
 
         return [
             'size' => $size,
@@ -67,11 +72,6 @@ class MetaReader
         return $mtime !== false ? $mtime : 0;
     }
 
-    public function calculateEtag(string $key, int $size): string
-    {
-        return md5($key . $size);
-    }
-
     private function detectMimeType(string $filePath): string
     {
         $mime = @mime_content_type($filePath);
@@ -98,11 +98,16 @@ class MetaReader
             return null;
         }
 
+        $etag = $this->etagStore->get($partPath);
+        if ($etag === null) {
+            return null;
+        }
+
         return [
             'number' => $partNumber,
             'size' => $size,
             'mtime' => $mtime,
-            'etag' => $this->calculateEtag((string)$partNumber, $size)
+            'etag' => $etag
         ];
     }
 }

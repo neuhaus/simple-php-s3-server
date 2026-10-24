@@ -7,7 +7,7 @@ Implement a lightweight, S3-compatible API gateway (PHP 8.1+) with a replaceable
 ## 2. Design Principles
 
 - **Minimalism**: Explicitly excludes ACL, Versioning, Object Lock, Lifecycle, Server-Side Encryption, cross-region replication, and other non-core capabilities.
-- **Backend-owned storage and metadata**: Controllers obtain size / mtime / mime / etag and bucket timestamps through storage interfaces. The default filesystem backend reads metadata from the filesystem without independent metadata storage.
+- **Backend-owned storage and metadata**: Controllers obtain size / mtime / mime / etag and bucket timestamps through storage interfaces. The default filesystem backend reads metadata from the filesystem; only content ETags are kept in small sidecar files.
 - **Error boundary convergence**: External responses return fixed S3 error codes and short messages; internal details are written only to logs.
 - **Backward compatibility**: Does not break the existing data directory structure or configuration file format.
 - **Modern PHP**: Uses PHP 8.1+, typed properties, and explicit storage interfaces.
@@ -144,16 +144,16 @@ Conventions:
 
 ## 8. Metadata Strategy
 
-The storage backend returns object metadata (`size`, `mtime`, `mime`, unquoted `etag`) and bucket creation timestamps. Controllers use these values rather than deriving them from paths. FileStorage has no independent metadata store and obtains object metadata as follows:
+The storage backend returns object metadata (`size`, `mtime`, `mime`, unquoted `etag`) and bucket creation timestamps. Controllers use these values rather than deriving them from paths. FileStorage obtains object metadata as follows:
 
 | Field | Source |
 | --- | --- |
 | size | file size |
 | mtime | file modification time (UTC output) |
 | mime | inferred via MIME detection, falls back to `application/octet-stream` on failure |
-| etag | hash computed from key and size (not a content hash); multipart composite etag uses the same formula |
+| etag | content MD5, as in S3; multipart objects use S3's composite form `md5(concatenated binary part MD5s)-{part count}` |
 
-> The ETag computation differs from the AWS standard (not based on content MD5); this is a known compatibility trade-off to avoid reading the disk for hashing. Clients should not use ETag as a content integrity check.
+> The MD5 is computed while the upload is written, so no extra disk read is needed, and stored in a sidecar file: `{DATA_DIR}/.meta/{bucket}/{key}.json` for objects, `{n}.meta.json` inside the upload directory for parts. Each sidecar records the inode, size and mtime of its file; a missing or stale sidecar (crash between write and record, files changed directly on disk, data from older versions) is repaired by hashing the file once. Clients such as rclone verify uploads against the ETag.
 
 ### 8.1 Stream ownership
 
@@ -248,7 +248,6 @@ See [Storage backends](docs/STORAGE_BACKENDS.md) for implementation contracts.
 - Cross-region replication, transfer acceleration
 - Browser POST-policy uploads (presigned GET and PUT are supported)
 - Multipart upload extensions like `x-amz-server-side-encryption`, `x-amz-storage-class`
-- Content-level ETag (known trade-off differing from AWS standard)
 - Virtual host-style addressing (host-style bucket); only path-style is supported
 - SigV2 and Bearer Token authentication (deprecated)
 

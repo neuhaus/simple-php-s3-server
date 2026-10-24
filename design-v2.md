@@ -7,7 +7,7 @@
 ## 2. 设计原则
 
 - **最小化**：明确排除 ACL、Versioning、Object Lock、Lifecycle、Server-Side Encryption、跨区域复制等非核心能力。
-- **存储与元数据归后端所有**：控制器通过存储接口获取 size / mtime / mime / etag 与 bucket 时间戳。默认文件系统后端从文件系统读取元数据，无独立元数据存储。
+- **存储与元数据归后端所有**：控制器通过存储接口获取 size / mtime / mime / etag 与 bucket 时间戳。默认文件系统后端从文件系统读取元数据；仅内容 ETag 保存在小型旁路（sidecar）文件中。
 - **错误边界收敛**：对外响应固定 S3 错误码与简短消息，内部细节仅写入日志。
 - **保持兼容**：不破坏现有数据目录结构与配置文件格式。
 - **现代 PHP**：使用 PHP 8.1+、类型化属性与显式的存储接口。
@@ -144,16 +144,16 @@ HTTP 请求
 
 ## 8. 元数据策略
 
-存储后端返回对象元数据（`size`、`mtime`、`mime`、不带引号的 `etag`）与 bucket 创建时间。控制器使用这些值，而非从路径推导。FileStorage 无独立元数据存储，按如下方式获取对象元数据：
+存储后端返回对象元数据（`size`、`mtime`、`mime`、不带引号的 `etag`）与 bucket 创建时间。控制器使用这些值，而非从路径推导。FileStorage 按如下方式获取对象元数据：
 
 | 字段 | 来源 |
 | --- | --- |
 | size | 读取文件大小 |
 | mtime | 读取文件修改时间（UTC 输出） |
 | mime | 通过 MIME 检测推断，失败回退 `application/octet-stream` |
-| etag | 基于 key 与 size 计算的哈希（非内容哈希）；多段上传的 composite etag 同样基于此公式 |
+| etag | 内容 MD5（与 S3 一致）；多段上传对象使用 S3 的复合格式 `md5(各 part 二进制 MD5 拼接)-{part 数}` |
 
-> ETag 计算方式与 AWS 标准不同（不基于内容 MD5），属于已知的兼容性取舍，旨在避免读盘计算哈希。客户端不应将 ETag 作为内容校验依据。
+> MD5 在写入上传内容时同步计算，无需额外读盘，并保存在旁路文件中：对象为 `{DATA_DIR}/.meta/{bucket}/{key}.json`，part 为上传目录内的 `{n}.meta.json`。旁路文件记录对应文件的 inode、大小与 mtime；若缺失或过期（写入与记录之间崩溃、直接在磁盘上修改、旧版本数据），则对文件计算一次哈希进行修复。rclone 等客户端会依据 ETag 校验上传结果。
 
 ### 8.1 流的所有权
 
@@ -248,7 +248,6 @@ php vendor/bin/phpunit
 - 跨区域复制、传输加速
 - 浏览器 POST policy 上传（支持预签名 GET 与 PUT）
 - 多段上传的 `x-amz-server-side-encryption`、`x-amz-storage-class` 等扩展头
-- 对象内容级 ETag（与 AWS 标准不同的已知取舍）
 - 虚拟主机风格寻址（host-style bucket），仅支持 path-style
 - SigV2 与 Bearer Token 认证（已弃用）
 

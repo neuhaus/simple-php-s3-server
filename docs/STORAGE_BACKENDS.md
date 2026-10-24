@@ -18,6 +18,9 @@ accept no required arguments. Applications can also inject a backend into
   be seekable; the response reads at most the requested length.
 - Metadata contains `size`, `mtime`, `mime`, and an unquoted `etag`. Bucket creation
   timestamps also come from the backend.
+- The `etag` is the hex MD5 of the object's content, or S3's multipart form
+  `md5(concatenated binary part MD5s)-{part count}`; part ETags are the parts' MD5s.
+  Clients such as rclone verify uploads against it.
 - Filesystem writes use a temporary sibling file and rename it into place after
   copying the input successfully.
 
